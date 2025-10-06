@@ -512,21 +512,13 @@ This white paper is for informational purposes only and does not constitute fina
 
 ## Contact Information
 
-- Website: [To be added]
-- GitHub: [Repository URL]
-- Email: [Contact email]
-- Discord: [Community link]
-- Twitter: [@TRUBlockchain]
+- Website: https://tokenizedrealutility.com
+- GitHub: TODO
+- Email: TODO
+- Discord: TODO
+- Twitter: TODO
 
 ---
 
 *Copyright © 2025 TRU Blockchain Development Team. All rights reserved.*
 
----
-
-## TODO
-1. **Team details** in a dedicated section
-2. **Actual network parameters** if different from my assumptions
-3. **Specific partnerships** or ecosystem developments
-4. **Website and contact information**
-5. **Any additional technical details** not covered in the READMEs
