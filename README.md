@@ -667,6 +667,576 @@ No single AI company, hosted API, or language model is required for the TRU bloc
 
 ---
 
+# Living Token Evolution
+
+TRU supports **AI-assisted Living Token Evolution**, allowing supported tokens to update their off-chain metadata over time while preserving a verifiable history of each evolution.
+
+Instead of replacing the original token or rewriting its history, each evolution creates a new persisted epoch and links it to the previous metadata state.
+
+A compact cryptographic commitment to that evolution is then submitted to the TRU blockchain through a normal transaction.
+
+## What Token Evolution Does
+
+A Living Token evolution can use an AI provider to generate a new version of the token's metadata based on its current state.
+
+The evolution system:
+
+```text
+Existing Token
+      │
+      ▼
+Load Latest Persisted State
+      │
+      ▼
+AI Provider
+      │
+      ▼
+Generate New Metadata
+      │
+      ▼
+Epoch N → Epoch N+1
+      │
+      ▼
+Hash Previous + New Metadata
+      │
+      ▼
+Persist Evolution Record
+      │
+      ▼
+Queue Blockchain Anchor
+      │
+      ▼
+Oracle Signs Transaction
+      │
+      ▼
+TRU Mempool
+      │
+      ▼
+Next Mined Block
+      │
+      ▼
+On-Chain Evolution Commitment
+```
+
+The complete AI-generated metadata does **not** need to be stored directly on-chain.
+
+Instead, TRU places a compact evolution commitment into an `OP_RETURN` transaction containing information such as:
+
+```text
+TRU_EVOLVE_V1
+tokenID
+tokenType
+epoch
+provider
+trigger
+previous_metadata_hash
+new_metadata_hash
+```
+
+This provides an auditable connection between the previous and new token states without unnecessarily putting the full AI response into the blockchain.
+
+---
+
+## Supported Evolution Providers
+
+Evolution can be performed using configured AI providers.
+
+For example:
+
+```text
+nemotron
+openai
+anthropic
+grok
+gemini
+ollama
+oobabooga
+custom
+```
+
+Provider availability depends on how the node was configured and which API keys or local AI services are available.
+
+Example using the local Nemotron provider:
+
+```bash
+./tru_evolve_token \
+  --token-id f0e6d042 \
+  --provider nemotron \
+  --db /path/to/data/utxo
+```
+
+---
+
+# Normal Evolution Workflow
+
+For a normal TRU installation, there are two parts involved:
+
+1. `tru_evolve_token` creates and persists the new evolution state.
+2. `tru_advanced` detects the queued evolution and creates the on-chain anchor transaction.
+
+Because `tru_evolve_token` accesses the LevelDB database directly, **do not run it while `tru_advanced` has the same database open.**
+
+The normal workflow is therefore:
+
+```text
+Stop node
+   ↓
+Run token evolution
+   ↓
+Verify latest state
+   ↓
+Restart node
+   ↓
+Oracle submits anchor transaction
+   ↓
+Miner confirms transaction
+```
+
+---
+
+# Step 1 — Stop the Node
+
+If `tru_advanced` is currently running, shut it down normally.
+
+Verify that it has stopped:
+
+```bash
+pgrep -af tru_advanced
+```
+
+There should be no running `tru_advanced` process using the database.
+
+---
+
+# Step 2 — Load the AI Environment
+
+If using providers configured through `.env`:
+
+```bash
+cd ~/NEW_TRU
+
+set -a
+source .env
+set +a
+```
+
+For a local Nemotron service, for example:
+
+```bash
+echo "$NEMOTRON_ENDPOINT"
+```
+
+Typical configuration:
+
+```text
+http://127.0.0.1:5051/v1/chat/completions
+```
+
+---
+
+# Step 3 — Check the Current Token State
+
+Before evolving the token, inspect its latest persisted evolution:
+
+```bash
+cd ~/NEW_TRU
+
+./build-native/bin/tru_evolve_token \
+  --token-id f0e6d042 \
+  --db /NEW_TRU/build-native/bin/data/utxo \
+  --show-latest
+```
+
+This displays the most recently persisted epoch.
+
+For example:
+
+```text
+Token: f0e6d042
+Epoch: 1
+Provider: nemotron
+...
+```
+
+---
+
+# Step 4 — Evolve the Token
+
+Run:
+
+```bash
+./build-native/bin/tru_evolve_token \
+  --token-id f0e6d042 \
+  --provider nemotron \
+  --db /NEW_TRU/build-native/bin/data/utxo
+```
+
+A successful evolution should advance the token exactly one epoch:
+
+```text
+Epoch 1 → Epoch 2
+```
+
+The evolution engine preserves the previous metadata hash and produces a new metadata hash.
+
+The new state is persisted before the blockchain anchor is submitted.
+
+---
+
+# Step 5 — Verify the New Evolution
+
+While the node is still stopped:
+
+```bash
+./build-native/bin/tru_evolve_token \
+  --token-id f0e6d042 \
+  --db /NEW_TRU/build-native/bin/data/utxo \
+  --show-latest
+```
+
+The new epoch should now be shown as the latest persisted state.
+
+---
+
+# Step 6 — Restart the TRU Node
+
+Start `tru_advanced` again:
+
+```bash
+cd ~/NEW_TRU/build-native/bin
+
+./tru_advanced \
+  --datadir /NEW_TRU/build-native/bin/data/utxo \
+  --cli \
+  --rpcport 8332
+```
+
+The AI Oracle service monitors the persisted evolution queue.
+
+When it finds the new evolution, it creates and signs a TRU transaction containing the evolution commitment.
+
+---
+
+# Step 7 — Watch the Evolution Anchor
+
+From another terminal:
+
+```bash
+cd ~/NEW_TRU/build-native/bin
+
+tail -f Tru_debug.log | \
+grep --line-buffered -iE \
+'TokenEvolutionAnchor|anchor_queue|signTransaction'
+```
+
+A successful submission looks similar to:
+
+```text
+[TokenEvolutionAnchor] Submitted token=f0e6d042 epoch=2 txid=<TXID>
+```
+
+You may also see:
+
+```text
+[TokenEvolutionAnchor] Anchored token=f0e6d042 epoch=2 txid=<TXID>
+```
+
+### Important
+
+In the current implementation, this means the anchor transaction was successfully created/submitted and associated with the evolution record.
+
+**Blockchain confirmation occurs when a miner includes that transaction in a block.**
+
+---
+
+# Step 8 — Check the Mempool
+
+The TRU JSON-RPC interface can be used to see whether the evolution transaction is waiting to be mined.
+
+```bash
+curl -sS \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"getrawmempool",
+    "params":{}
+  }' \
+  http://127.0.0.1:8332/rpc | python3 -m json.tool
+```
+
+Example:
+
+```json
+{
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": [
+        "0af06ae9f80d399a8ac41ddeb00ad3a86949498c5adc05bf553a438d2e9d3a6e"
+    ]
+}
+```
+
+This means:
+
+```text
+0af06ae9...d3a6e
+```
+
+is currently in the TRU mempool waiting for inclusion in a block.
+
+For an evolution transaction, the flow is now:
+
+```text
+Evolution complete       ✅
+Evolution persisted      ✅
+Anchor transaction built ✅
+Transaction signed       ✅
+Transaction in mempool   ✅
+Blockchain confirmation  ⏳
+```
+
+---
+
+# Step 9 — Mine the Anchor
+
+A miner can now mine the next TRU block.
+
+For example:
+
+```bash
+cd ~/NEW_TRU/build-native/bin
+
+./tru_miner_cpu \
+  --node-ip 127.0.0.1 \
+  --node-port 8332 \
+  --mineraddr YOUR_TRU_ADDRESS \
+  --threads 4
+```
+
+The built-in CPU/GPU mining options may also be used.
+
+Once the transaction is included in a block, the anchor leaves the mempool.
+
+---
+
+# Step 10 — Verify Confirmation
+
+Run `getrawmempool` again:
+
+```bash
+curl -sS \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"getrawmempool",
+    "params":{}
+  }' \
+  http://127.0.0.1:8332/rpc | python3 -m json.tool
+```
+
+If no other transactions are waiting, the response will be:
+
+```json
+{
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": []
+}
+```
+
+If the evolution transaction was previously present and disappears immediately after a successful block is mined, it has progressed out of the mempool and into block processing.
+
+---
+
+# How a Normal User Would Use Evolution
+
+The commands above expose the complete low-level workflow for operators and developers.
+
+A normal user does **not need to manually inspect LevelDB, calculate metadata hashes, construct `OP_RETURN` scripts, sign anchor transactions, or manage the evolution queue.**
+
+Conceptually, the user's workflow is simply:
+
+```text
+Choose Token
+     ↓
+Choose AI Provider
+     ↓
+Evolve Token
+     ↓
+Review New State
+     ↓
+TRU automatically queues blockchain proof
+     ↓
+Node submits anchor transaction
+     ↓
+Network miner confirms it
+```
+
+A future wallet/UI can therefore expose evolution as something as simple as:
+
+```text
+Token:       My Living Token
+Epoch:       4
+AI Provider: Nemotron
+
+[ Evolve Token ]
+```
+
+with an evolution history such as:
+
+```text
+Epoch 0  Original
+Epoch 1  Nemotron     Confirmed
+Epoch 2  Nemotron     Confirmed
+Epoch 3  Gemini       Confirmed
+Epoch 4  Nemotron     Pending Confirmation
+```
+
+The underlying cryptographic and blockchain operations remain handled by TRU.
+
+---
+
+# Evolution State vs. Blockchain Anchor
+
+These are intentionally separate concepts.
+
+**Evolution State**
+
+Contains the complete living-token evolution information and AI-generated metadata.
+
+Persisted locally under evolution records such as:
+
+```text
+TOKEN_EVOLUTION/latest:<tokenID>
+TOKEN_EVOLUTION/epoch:<tokenID>:<epoch>
+```
+
+**Blockchain Anchor**
+
+Contains only the compact information needed to cryptographically prove the evolution.
+
+The blockchain therefore acts as an immutable timestamped proof of:
+
+```text
+Token X
+changed from metadata hash A
+to metadata hash B
+at epoch N
+using provider Y
+```
+
+without requiring the blockchain to store the entire AI-generated document.
+
+---
+
+# Oracle Funding
+
+The evolution oracle must have a spendable TRU UTXO because each evolution anchor is a normal signed blockchain transaction.
+
+Configuration example:
+
+```ini
+[default]
+oracle.address=<TRU_ADDRESS>
+oracle.wallet=tru.dat
+node.ip=127.0.0.1
+node.port=8332
+```
+
+The configured address must belong to `tru.dat`.
+
+Coinbase mining rewards must reach maturity before they can be spent by the oracle.
+
+If the oracle cannot find a usable UTXO, the log may show:
+
+```text
+[TokenEvolutionAnchor] No UTXO large enough for fee
+```
+
+The evolution state itself remains persisted; the anchor stays queued and can be retried after the oracle is funded.
+
+---
+
+# Failure Safety
+
+Living Token Evolution is designed so a failure in the blockchain-anchor stage does **not erase the completed AI evolution**.
+
+For example:
+
+```text
+AI succeeds
+↓
+Epoch 4 persisted
+↓
+Node cannot currently pay anchor fee
+↓
+Anchor remains queued
+↓
+Oracle later receives TRU
+↓
+Anchor retried
+↓
+Transaction confirmed
+```
+
+Likewise, an AI-provider failure does not advance the persisted epoch.
+
+This prevents an unsuccessful evolution attempt from corrupting or skipping the token's evolution history.
+
+---
+
+## Quick Reference
+
+```bash
+# STOP tru_advanced first.
+
+# Show latest state
+./build-native/bin/tru_evolve_token \
+  --token-id f0e6d042 \
+  --db /NEW_TRU/build-native/bin/data/utxo \
+  --show-latest
+
+# Evolve
+./build-native/bin/tru_evolve_token \
+  --token-id f0e6d042 \
+  --provider nemotron \
+  --db /NEW_TRU/build-native/bin/data/utxo
+
+# Restart node
+cd ~/NEW_TRU/build-native/bin
+
+./tru_advanced \
+  --datadir /NEW_TRU/build-native/bin/data/utxo \
+  --cli \
+  --rpcport 8332
+
+# Watch anchor
+tail -f Tru_debug.log | \
+grep --line-buffered -iE 'TokenEvolutionAnchor|anchor_queue|signTransaction'
+
+# Check mempool
+curl -sS \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"getrawmempool",
+    "params":{}
+  }' \
+  http://127.0.0.1:8332/rpc | python3 -m json.tool
+```
+
+Your current result containing:
+
+```text
+0af06ae9f80d399a8ac41ddeb00ad3a86949498c5adc05bf553a438d2e9d3a6e
+```
+
+is exactly the state you'd expect **between anchor submission and the next mined block**. In other words, for your current test, the next meaningful action is to mine a block and verify that transaction leaves the mempool.
+
+---
 ## Networking (P2P)
 
 Nodes communicate over TCP using Protobuf messages wrapped in a framed envelope: a 4-byte type, a 4-byte length, a 32-byte SHA-256 payload checksum, and the payload. Messages exceeding 32 MiB are rejected, and the checksum is verified before parsing.
@@ -809,7 +1379,15 @@ TRU is a working chain. The following remain honest placeholders or partial impl
 Everything else described above — consensus, PoW, UTXO handling, standard scripting, single- and multi-signature verification, deterministic `OP_CHAINSTATECHECK`, tokens, state opcodes, gas, hashing opcodes, P2P, storage, wallets, mining, RPC, and the explorer — is implemented and functioning.
 
 ---
+## Mining with stand alone
 
+```
+./tru_miner --node-ip 127.0.0.1 --node-port 8332 --mineraddr 1CaVjWwXheAm74AKLa3KbyLEWAB5L6s49t
+
+./tru_miner_cpu --node-ip 127.0.0.1 --node-port 8332 --mineraddr 1CaVjWwXheAm74AKLa3KbyLEWAB5L6s49t --threads 4
+
+```
+---
 ## Security Notes
 
 TRU is an independent, single-implementation chain that has not undergone third-party audit or sustained adversarial testing. If you deploy it beyond a controlled/demo environment, be aware:
